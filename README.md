@@ -14,6 +14,7 @@ The [Brain Tumor Dataset]() from Kaggle was used for this project.
 * RStudio
 
 ### Dependencies:
+This project uses the following packages:
 * psych
 * dplyr
 * ggplot2
@@ -26,3 +27,12 @@ The [Brain Tumor Dataset]() from Kaggle was used for this project.
 * FNN
 * nnet
 
+### Techniques:
+* Data wrangling and cleaning
+* Splitting Data
+* Training, Evaluating, and Tuning models for:
+  * Random Forests
+  * Logistic Regression
+  * k-Nearest Neighbors (kNN)
+  * Neural Networks
+* Building Ensemble Models
