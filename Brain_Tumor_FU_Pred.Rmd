@@ -1,0 +1,1260 @@
+---
+title: "An Ensemble Model: Follow-up Prediction for Brain Tumor Patients"
+author: "Zoe Chow"
+date: "Summer 2025"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: true 
+    toc_depth: 5
+    number_sections: false
+    df_print: paged
+subtitle: DA5030
+---
+## Introduction
+In this report, we use the [_Brain Tumor Dataset_](https://www.kaggle.com/datasets/miadul/brain-tumor-dataset) (MIT license, Kaggle) to develop an ensemble model that predicts whether a patient requires follow-up treatment based on tumor characteristics and clinical information. The ensemble combines random forests with homogeneous ensembles of logistic regression, neural networks, and k-nearest neighbors (kNN) to capture both linear and nonlinear relationships in the data.
+
+```{r LoadPackages, echo = F,warning=F, message=F}
+# packages needed to be loaded 
+packages <- c('psych', 'dplyr', 'ggplot2', 'kableExtra', 'knitr', 'randomForest', 'caret', 'pROC', 'class', 'FNN', 'nnet')
+
+# function to install/load packages
+load_packages <- function(package){
+  for (package in packages){
+    if (!require(package, character.only = TRUE)) {
+      install.packages(package)
+      require(package, character.only = TRUE)
+    }
+  }
+}
+
+
+# apply function
+load_packages(packages)
+
+# for display purposes 
+formatted_packages <- paste0("`", packages, "`", collapse = ", ")
+```
+
+The packages used in this project: `r formatted_packages`.
+
+```{r LoadData, echo=F}
+url <- "https://www.dropbox.com/scl/fi/572e36q3iqjjctw1bizt7/brain_tumor_dataset_with_missing.csv?rlkey=qmijtmzuoremdr8p0x4a4chhw&st=2urw3h8v&dl=1"
+
+df <- read.csv(url, stringsAsFactors = T)
+```
+
+## Exploratory Data Analysis (EDA)
+Before building the ensemble model to predict whether a patient requires follow-up care, it is important to first explore and understand the dataset. Exploratory Data Analysis (EDA) helps reveal the structure of the data, understand variable distributions, uncover relationships between features, detect potential class imbalances, and identify data quality issues such as missing values or outliers. These insights are essential for informed preprocessing and effective model development.
+
+### Data Structure
+```{r ViewData, echo=F}
+head(df, 3)
+```
+
+```{r DataStructure, echo=F}
+str(df)
+```
+The dataset contains **20,000** observations and **19** variables, including the target variable, `Follow_Up_Required.` The remaining features provide a comprehensive profile of each patient, covering demographic information, tumor characteristics (such as size, type, and stage), presenting symptoms, and treatment history (including surgery, radiation, and chemotherapy). Of the 19 variables, there are **5 numerical features**, **13 categorical features**, and **1 target variable**. The numeric feature `Patient_ID` is an identifier with no analytical meaning. Therefore, we will remove this column before further examining the data, resulting in **18** remaining variables. Additionally, the target and categorical features are stored as factors; these will need to be encoded for models other than random forests. 
+
+```{r removePatienID, echo=F}
+df <- df %>% select(-Patient_ID)
+```
+
+
+### Data Distribution
+```{r SummaryStats, echo=F}
+summary(df)
+```
+According to the summary statistics, there is no evidence of class imbalance in the target variable. Additionally, the mean and median values of the numeric features are relatively close, suggesting these variables may be symmetric. The categorical features also appear to have relatively balanced class frequencies. These assumptions will be further examined using visualizations of the data distributions. 
+
+
+#### Visualization of Features
+The distribution of the target variable (`Follow_Up_Required`), numeric variables, and categorical variables will be examined. The numeric and categorical variables will be split by the classes of the target variable.
+
+```{r featureNames, echo=F}
+target <- 'Follow_Up_Required'
+
+# col names of numeric features
+numeric_feats <- names(df)[sapply(df, is.numeric)]
+display_num_feats <- paste0("`", numeric_feats, "`", collapse = ", ") # for knitting purposes
+
+# col names for categorical features
+cat_feats <- names(df)[sapply(df, is.factor) & names(df) != target]
+display_cat_feats <- paste0("`", cat_feats, "`", collapse = ", ") # for knitting purposes
+```
+
+
+##### Target Variable
+```{r target_dist, fig.dim=c(5,3), fig.align='center', echo=F}
+ggplot(data = df, aes(.data[[target]])) +
+  geom_bar(fill = "steelblue") + 
+  labs(title = paste("Distribution of Target Variable:", target),
+       x = target, y = "Count") +
+  theme_minimal()
+```
+The graph above confirms that there is no class imbalance displayed in the data. If class imbalance were present, _stratified sampling_ would be essential during train-test splitting to preserve representative class distributions.
+
+##### Numeric Features
+
+The numeric features of the dataset include `r display_num_feats`. The graphs depict the distribution of each numeric feature according to the class of the predictor. 
+
+```{r NumDist, fig.align='default', fig.dim=c(4,2), warning=F, message=F, echo=F}
+# function to plot numeric features (grouped by labels)
+numericDist <- function(df, num_feats, target, type=NULL){
+  # function takes the data, numeric features, target variable, and the type of type of transformation used (for display purposes)
+  for(feats in num_feats){
+    print(
+      ggplot(df, aes(x=.data[[feats]], fill=.data[[target]])) +
+        geom_histogram(position = "identity", alpha = 0.5, bins = 30) +
+        labs(title = paste(type, "Distribution of", feats, "by Target"), x = feats, y = "Count") +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(size = 10, face = "bold"),
+          axis.title = element_text(size = 8),
+          legend.title = element_text(size = 8)
+          )
+    )
+  }
+}
+
+# plot numeric feats
+numericDist(df, numeric_feats, target)
+
+```
+
+According to the graphs, although the features are not normally distributed, they are relatively symmetric and uniform, indicating that the values are evenly spread as opposed to being concentrated around the mean. As such, it is likely that there are no outliers in the data, however, this will need to be confirmed using the z-score. Log and square root transformations can also will tested to see whether they improve the distribution of the data. Standardization will also be needed for kNN and neural network models.
+
+##### Categorical Features
+The categorical features of the data include `r display_cat_feats`. The graphs depict the distribution of each categorical feature according to the class of the predictor. Categorical distribution visualization provides insight into proportions, patterns, and imbalances in the data, which will allow for better preprocessing decisions. 
+```{r CatFeatDist, fig.align='default', fig.dim=c(4,2), echo=F}
+# plot for categorical features by target
+catDist <- function (df, cat_features, target){
+  for (feature in cat_features) {
+    print(
+      ggplot(df, aes(x = .data[[feature]], fill = .data[[target]])) +
+        geom_bar(position = "dodge") +
+        labs(title = paste("Bar Plot of", feature, "by Target"),
+             x = feature, y = "Count") +
+        theme_minimal() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1),
+              plot.title = element_text(size = 10, face = "bold"),
+              axis.title = element_text(size = 8),
+              legend.title = element_text(size = 8)
+          )
+    )
+  }
+}
+
+catDist(df, cat_feats, target)
+
+```
+
+The distribution of categorical features is relatively balanced. While `Symptom_3` contains missing values, symptoms 1, 2, and 3 share the same class structure. Rather than imputing the missing values in `Symptom_3` and applying one-hot encoding to each symptom variable separately, I will create binary indicator variables for each symptom class to capture whether the patient previously experienced each specific symptom type. This approach will reduce dimensionality while preserving symptom information and better handling the missing data pattern. Furthermore, I will convert `Stage` to numeric values to maintain its natural ordinality. For features with only 2 classes (`Gender`, `Tumor_Type`, `Radiation_Treatment`, `Surgery_Performed`, `Chemotherapy`, `Family_History`, and `MRI_Results`), I will apply label encoding (0/1). Given the low cardinality of the remaining categorical features (`Location` and `Histology`)—each having 4 classes—I will perform one-hot encoding. This preprocessing approach will be applied to the dataset used for logistic regression, kNN, and neural network models.
+
+### Missing 
+```{r Missing?}
+colSums(is.na(df))
+```
+Missing data are observed in three features: `Tumor_Size`, `Symptom_3`, and `Survival_Rate`. As mentioned previously, instead of imputing for `Symptom_3`, I will create binary features to represent the symptom classes for all symptom features. As for `Tumor_Size` and `Survival_Rate`, I will impute using grouped statistics from related features. `Tumor_Type`, `Histology`, `Stage`, and `Location` directly determine typical tumor characteristics; therefore, I will impute `Tumor_Size` with either the mean or median based on these grouping features. For `Survival_Rate`, I will use established prognostic factors in oncology—`Tumor_Type`, `Histology`, `Stage`, and `Age`—to impute missing values. The choice between mean and median will be determined based on the presence of outliers. If outliers are prevalent within the groups, I will use the median for robustness. 
+
+Although Decision Trees can handle missing data natively through surrogate splits, the function I plan to use for Random Forest (`randomForest()` of the **randomForest** package) does not handle missing data by default. Therefore, I will apply the imputations and binary feature engineering that I mentioned before for all datasets. This will also ensure consistency throughout the different models. 
+
+
+### Outliers 
+```{r Outliers?}
+outliers <- function(df) {
+  outliers <- c()
+  for (col in 1:ncol(df)) {
+    m <- mean(df[[col]], na.rm = TRUE)
+    s <- sd(df[[col]], na.rm = TRUE)
+    
+    # Compute z-scores and find outliers
+    z_scores <- abs((df[[col]] - m) / s)
+    outlierRows <- which(z_scores > 3.0)
+    
+    # append outlier row to a list 
+    outliers <- c(outliers, outlierRows)
+    
+    # Print results
+    col_name <- colnames(df)[col]
+    if (length(outlierRows) > 0) {
+      cat("Found outliers in column '", col_name, "':\n", sep = "")
+      cat("   --> ", df[outlierRows,col], "\n\n")
+    } else {
+      cat("No outliers found in column '", col_name, "'\n", sep = "")
+    }
+  }
+  
+}
+
+outliers <- outliers(df[,numeric_feats])
+```
+
+As shown above, there are no apparent outliers in the overall numeric feature distributions. However, in the preprocessing section, I will assess outliers within each imputation group (e.g., specific combinations of Tumor_Type, Histology, and Stage) to determine whether to use mean or median for imputing missing values. If outliers are detected within specific groups, I will use the median for those groups to ensure robust imputation.
+
+## Data Preprocessing 
+### Missing Data
+The function below was created to handle missing value imputation using grouped statistics. For each group combination, it checks whether outliers exist in the feature being imputed (using z-score > 3). If outliers are detected within a group, missing values in that group are imputed using the median for robustness against extreme values. If no outliers are found within a group, the mean is used instead. This group-specific approach ensures that the imputation method is tailored to the data distribution within each relevant subgroup.
+```{r missingFunc}
+# function to handle missing values according to whether there are outliers after grouping
+handle_missing <- function(df, feature, group_vars) {
+  feature_sym <- sym(feature)
+  
+  # For each group, determine imputation method and apply it
+  df <- df %>%
+    group_by(across(all_of(group_vars))) %>%
+    mutate(
+      # Calculate group statistics (excluding missing values)
+      # !!feature to remove quotes
+      group_mean = mean(!!feature_sym, na.rm = TRUE),
+      group_sd = sd(!!feature_sym, na.rm = TRUE),
+      
+      # Check for outliers within this specific group
+      has_outliers = any(abs((!!feature_sym - group_mean) / group_sd) > 3, na.rm = TRUE),
+      
+      # Impute based on whether THIS group has outliers
+      !!feature_sym := case_when(
+        is.na(!!feature_sym) & has_outliers ~ median(!!feature_sym, na.rm = TRUE),
+        is.na(!!feature_sym) & !has_outliers ~ mean(!!feature_sym, na.rm = TRUE),
+        TRUE ~ !!feature_sym
+      )
+    ) %>%
+    select(-group_mean, -group_sd, -has_outliers) %>%
+    ungroup()
+  
+  return(df)
+}
+```
+
+
+```{r impute_missing}
+# Handle Tumor_Size
+TS_group <- c("Tumor_Type", "Histology", "Stage", "Location")
+clean_df <- handle_missing(df, "Tumor_Size", TS_group)
+
+# Handle Survival_Rate
+SR_group <- c("Tumor_Type", "Histology", "Stage", "Age")
+clean_df <- handle_missing(clean_df, "Survival_Rate", SR_group)
+
+# Check if there are still missing data in the imputed columns
+colSums(is.na(clean_df[,c("Tumor_Size", "Survival_Rate")]))
+```
+
+As shown above, the function properly handled the missing values in `Tumor_Size` and `Survival_Rate`. Next, we will move onto the encoding portion of the preprocessing step. This will involve creating binary symptom indicators (which addresses the missing values in `Symptom_3` through feature engineering) and encoding the remaining categorical features.
+
+### Encoding 
+There are `r length(cat_feats)` categorical features that require encoding. As mentioned previously, the preprocessing steps will include: creating binary symptom indicators, converting `Stage` to numeric values, applying label encoding to binary features (`Gender`, `Tumor_Type`, `Radiation_Treatment`, `Surgery_Performed`, `Chemotherapy`, `Family_History`, and `MRI_Results`), and performing one-hot encoding on `Location` and `Histology`. 
+
+As Random Forest can handle factorized categorical features, aside from creating binary symptom indicators to handle missing data, further encoding will not be performed for the dataset meant to train and test the model. Furthermore, while logistic regression and kNN can handle categorical/factor formatted target variables, neural networks require numerically encoded targets (0/1). Therefore, I will maintain the target as categorical for logistic regression and kNN, and create a separate dataset with numerically encoded target variable for neural networks.
+
+#### Create Binary Symptom Indicators 
+```{r symptom_feat_eng}
+# Create binary symptom indicators and remove orig symptom columns
+clean_df<- clean_df %>% 
+  mutate(
+    # binary symptom indicators
+    Headache = ifelse(Symptom_1 %in% 'Headache' | 
+                     Symptom_2 %in% 'Headache' | 
+                     Symptom_3 %in% 'Headache', 1, 0),
+    Vision_Issues = ifelse(Symptom_1 %in% 'Vision Issues' | 
+                          Symptom_2 %in% 'Vision Issues' | 
+                          Symptom_3 %in% 'Vision Issues', 1, 0),
+    Seizures = ifelse(Symptom_1 %in% 'Seizures' | 
+                     Symptom_2 %in% 'Seizures' | 
+                     Symptom_3 %in% 'Seizures', 1, 0),
+    Nausea = ifelse(Symptom_1 %in% 'Nausea' | 
+                   Symptom_2 %in% 'Nausea' | 
+                   Symptom_3 %in% 'Nausea', 1, 0)
+  ) %>%
+  select(-Symptom_1, -Symptom_2, -Symptom_3) %>%
+  # Move target variable to the last column (personal preference)
+  relocate(Follow_Up_Required, .after = last_col())
+```
+
+To verify that the binary symptom indicators were properly created and the original symptom columns were removed, I examined the number of columns as well as the column names in the dataframe. As the three symptom columns were replaced by the 4 symptom classes, there should be a total of 19 variables instead of the original 18 and the variables _Headache_, _Vision_Issues_, _Seizures_, and _Nausea_ should be present.
+```{r bsf_check, echo=F}
+names <- colnames(clean_df)
+cat("There are", length(names), "columns present:\n")
+cat(paste0(names, collapse = ", "), "\n")
+```
+
+The preprocessed dataframe is copied to a new dataframe (`rf_df`) for Random Forest model development before we proceed with further encoding.
+```{r rf_df, echo=F}
+rf_df <- clean_df  # set aside the data for random forest
+```
+
+#### Encode Categorical Features
+```{r encoding_cat}
+# Encoding remaining categorical features for logistic regression, kNN, and neural networks
+clean_df <- clean_df %>%
+  mutate(
+    # One-Hot Encoding
+    # Location: Temporal(1,0,0), Parietal(0,1,0), Frontal(0,0,1), Occipital(0,0,0) 
+    Temporal = ifelse(Location == 'Temporal', 1, 0),
+    Parietal = ifelse(Location == 'Parietal', 1, 0),
+    Frontal = ifelse(Location == 'Frontal', 1, 0),
+    
+    # Histology: Astrocytoma(1,0,0), Glioblastoma(0,1,0), Meningioma(0,0,1), Medulloblastoma(0,0,0)
+    Astrocytoma = ifelse(Histology == 'Astrocytoma', 1, 0),
+    Glioblastoma = ifelse(Histology == 'Glioblastoma', 1, 0),
+    Meningioma = ifelse(Histology == 'Meningioma', 1, 0),
+  
+    # Numeric Conversion for Stage
+    Stage = case_when(
+      Stage == 'I' ~ 1,
+      Stage == 'II' ~ 2,
+      Stage == 'III' ~ 3,
+      Stage == 'IV' ~ 4
+    ),
+    
+    # Label Encoding for Binary Features
+    Gender = case_when(
+      # Gender: Male = 1, Female = 0,
+      Gender == 'Male' ~ 1,
+      Gender == 'Female' ~ 0
+    ),
+      
+    Tumor_Type = case_when(
+      # Tumor_Type: Malignant = 1, Benign = 0
+      Tumor_Type == 'Malignant' ~ 1,
+      Tumor_Type == 'Benign' ~ 0
+    ),
+    
+    Radiation_Treatment = case_when(
+      # Radiation_Treatment: Yes = 1, No = 0
+      Radiation_Treatment == 'Yes' ~ 1,
+      Radiation_Treatment == 'No' ~ 0
+    ),
+      
+    Surgery_Performed = case_when(
+      # Surgery_Performed: Yes = 1, No = 0
+      Surgery_Performed == 'Yes' ~ 1,
+      Surgery_Performed == 'No' ~ 0
+    ),
+    
+    Chemotherapy = case_when(
+      # Chemotherapy: Yes = 1, No = 0
+      Chemotherapy == 'Yes' ~ 1,
+      Chemotherapy == 'No' ~ 0
+    ),
+    
+    Family_History = case_when(
+      # Family_History: Yes = 1, No = 0
+      Family_History == 'Yes' ~ 1,
+      Family_History == 'No' ~ 0
+    ),
+      
+    MRI_Result = case_when(
+      # MRI_Result: Positive = 1, Negative = 0
+      MRI_Result == 'Positive' ~ 1,
+      MRI_Result == 'Negative' ~ 0
+    )
+  ) %>%
+
+  # Remove factorized categorical features to clean up 
+  select(-Location, -Histology) %>%
+  # Move target variable to the last column (personal preference)
+  relocate(Follow_Up_Required, .after = last_col())
+
+```
+
+To verify correct categorical encoding, I examined the data types of all variables. One-hot encoding of `Location` and `Histology` should have created 6 new binary columns, resulting in `ncol(clean_df)` total variables. All features should now be numeric except the target variable (`Follow_Up_Required`).
+```{r verify_encode, echo=F}
+sapply(clean_df, class)
+```
+
+#### Target Encoding for Neural Network Models
+The categorical target variable will be converted to numerical format using label encoding, as required for the neural network model and the preprocessed data is saved into a new dataframe (`nn_df`)
+```{r encode_target}
+nn_df <- clean_df %>%
+  mutate(
+    Follow_Up_Required = case_when(
+      Follow_Up_Required == 'Yes' ~ 1,
+      Follow_Up_Required == 'No' ~ 0
+    )
+  )
+```
+
+The target variable (`Follow_Up_Required`) is now `r class(nn_df$Follow_Up_Required)`.
+
+### Correlation Assessment
+Now that missing data have been imputed and categorical features have been encoded, we can perform a correlation analysis. For this analysis, we will use the Random Forest dataset as it has undergone the least preprocessing and will provide feature-outcome relationships that are easier to interpret clinically.
+```{r corr, echo=F}
+# convert target to numeric for cor purposes
+cor_target <- ifelse(rf_df$Follow_Up_Required == "Yes", 1, 0)
+```
+
+#### Numeric Features
+```{r corNum, echo=F}
+# calculate correlation of numeric feats to the target
+num_cor <- cor(rf_df[,numeric_feats], cor_target)
+
+# calculate correlation of numeric features
+cor_matrix <- cor(clean_df[, numeric_feats])
+
+# combine
+num_cor_matrix <- cbind(cor_matrix, num_cor)
+
+# change name for easy interpretation
+colnames(num_cor_matrix)[5] <- "Yes"
+
+# Display 
+kable(num_cor_matrix, caption = "Correlation of numeric features with each other and with the target ") %>%
+  kable_styling()
+```
+
+#### Categorical Features
+```{r cat_cor, echo=F}
+# extract names of categorical features
+cat_feats <- setdiff(names(rf_df), c(numeric_feats, target))
+
+chi_results <- lapply(cat_feats, function(var) {
+  tbl <- table(rf_df$Follow_Up_Required, rf_df[[var]])
+  test <- chisq.test(tbl)
+  data.frame(Feature = var, ChiSq = test$statistic, p_value = test$p.value)
+})
+
+chi_results <- do.call(rbind, chi_results)
+chi_results
+
+kable(chi_results, caption = "Chi-Sq Test Results for Categorical Features", row.names = F) %>% kable_styling()
+```
+The tables indicate minimal multicollinearity among numeric predictors and negligible correlation with the target variable. Similarly, chi-square tests revealed no significant associations between categorical features and the target outcome (p > 0.05), suggesting weak univariate relationships across all features. Despite the lack of strong individual predictors, the manageable feature-to-observation ratio (23:20,000) and absence of multicollinearity suggest that dimensionality reduction techniques such as PCA are unnecessary. Given these findings, modeling efforts will prioritize sensitivity to ensure that patients requiring follow-up are correctly identified, while tuning will aim to improve specificity without compromising sensitivity.
+ 
+
+### Model-Specific Preprocessing
+Now that we have completed the preprocessing steps shared between logistic regression, kNN, and neural network models (missing data imputation, encoding, and multicollinearity assessment), we will address model-specific requirements. First, we will consider transformations to improve feature distributions for logistic regression. Then, we will apply scaling for kNN and neural network models.
+
+#### Transformation (Logistic Regression)
+Although the numeric features appear relatively symmetric, log and square root transformations may further improve their distributions for logistic regression. We will apply both transformations and compare the resulting distributions visually to determine which version of the dataset has the most suitable distribution characteristics before proceeding with model fitting.
+
+##### Log Transformation
+```{r log_df, fig.align='default', fig.dim=c(4,2)}
+log_df <- clean_df %>%
+  mutate(across(all_of(numeric_feats), ~ log(.x + 1)))
+
+numericDist(log_df, numeric_feats, target, "Log")
+```
+
+The log transformation did not improve the distribution of the numeric features. Instead, the data is now left skewed.
+
+##### Square Root Transformation
+```{r sqrt_df, fig.align='default', fig.dim=c(4,2)}
+sqrt_df <- clean_df %>%
+  mutate(across(all_of(numeric_feats), ~ sqrt(.x)))
+
+numericDist(sqrt_df, numeric_feats, target, "Square Root")
+```
+
+The square root transformation also did not improve the distribution of the numeric features. The data is also mostly left-skewed. 
+
+Both log and square root transformations failed to improve the distribution of the numeric features, instead creating left-skewed distributions. This confirms that the original data distributions are already well-suited for analysis. Since transformations did not provide any benefit and actually worsened the distribution characteristics, we will proceed with the original untransformed dataset for logistic regression modeling.
+
+#### Scaling (kNN and Neural Networks)
+kNN and neural networks work best when features are scaled to a similar range. kNN relies on distance calculations that can be skewed by features with different scales, while neural networks require scaled inputs for stable training. Since the numeric data follows a relatively uniform distribution, z-score standardization is appropriate to transform all features.
+```{r scaled_df}
+# scale all features except target for kNN and neural network datasets
+kNN_df <- clean_df %>%
+  mutate(across(-Follow_Up_Required, ~ as.numeric(scale(.))))
+
+nn_df <- nn_df %>%
+  mutate(across(-Follow_Up_Required, ~ as.numeric(scale(.))))
+```
+
+## Data Splitting
+Before training the models, the data must be split. Since my dataset is quite large with 20,000 observations, I plan to split the data into 3 parts: a training set (60%), a validation set (20%), and a test set (20%) . This split is ideal because it prevents data leakage and allows the final model to be tested on unseen data. The splitting of data will need to be done for the datasets prepared for Random Forest (`rf_df`), Logistic Regression (`clean_df`), kNN (`kNN_df`), and Neural Network (`nn_df`) models.
+
+To create the splits, I used the `sample()` function to generate random indices for the training, validation, and test sets. This approach ensures that all four models are trained and evaluated on datasets with the same underlying observations, even though their features may be preprocessed differently.
+
+```{r split_index}
+set.seed(2025)
+
+# create training subset 60%
+train_index <- sample(x = 1:nrow(df),
+                      size = (round(nrow(df)*0.6,0)),
+                      replace = F)
+
+# create remaining indices (not in training set)
+remaining_index <- setdiff(1:nrow(df), train_index)
+
+# split the remaining 40% into validation and test sets
+val_index <- sample(x = remaining_index,
+                    size = (round(length(remaining_index)*0.5,0)),
+                    replace = F)
+
+# test set gets the remaining indices
+test_index <- setdiff(remaining_index, val_index)
+```
+
+Furthermore, I used the following function to ensure that the training, validation, and test sets maintained the intended proportions of the original dataset (60:20:20).
+```{r check_splits}
+# split check
+split_check <- function(train, val, test, orig, type){
+  train_p <- round(nrow(train)/nrow(orig)*100)
+  val_p <- round(nrow(val)/nrow(orig)*100)
+  test_p <- round(nrow(test)/nrow(orig)*100)
+  
+  # Table for split with both counts and percentages
+  split <- tibble(
+    'Dataset' = c("Train", "Validation", "Test", "Total"),
+    'Count' = c(nrow(train), nrow(val), nrow(test), nrow(orig)),
+    'Percentage (%)' = c(train_p, val_p, test_p, 100)
+  )
+  
+  kable(split, caption = paste0("Percentage of data for ", type, " splits")) %>%
+    kable_styling()
+}
+```
+
+
+### Random Forest
+```{r rf}
+# Random Forest
+rf_train <- rf_df[train_index,]
+rf_val <- rf_df[val_index,]
+rf_test <- rf_df[test_index,]
+split_check(rf_train, rf_val, rf_test, rf_df, "Random Forest")
+```
+
+
+### Logistic Regression
+```{r log_split}
+# Logistic Regression
+LR_train <- clean_df[train_index,]
+LR_val <- clean_df[val_index,]
+LR_test <- clean_df[test_index,]
+split_check(LR_train, LR_val, LR_test, clean_df, "Logistic Regression")
+```
+
+
+### kNN
+```{r knn_split}
+# kNN
+kNN_train <- kNN_df[train_index,]
+kNN_val <- kNN_df[val_index,]
+kNN_test <- kNN_df[test_index,]
+split_check(kNN_train, kNN_val, kNN_test, kNN_df, "kNN")
+```
+
+
+### Neural Network
+```{r nn_split}
+# Neural Networks
+nn_train <- nn_df[train_index,]
+nn_val <- nn_df[val_index,]
+nn_test <- nn_df[test_index,]
+split_check(nn_train, nn_val, nn_test, nn_df, "Neural Networks")
+```
+
+## Model Development
+With the data properly split, the individual models—random forest, homogeneous logistic regression, homogeneous kNN, and homogeneous neural network—are trained using bagging and evaluated using k-fold cross-validation on the training set. Their predictions are then combined to build a heterogeneous ensemble, which is tuned and evaluated on the validation set using the holdout method. Finally, the fully tuned ensemble is assessed on the unseen test set to provide an unbiased estimate of its performance. 
+
+To evaluate the models, we will calculate key metrics—**overall accuracy**, **true positive rate**, **true negative rate**, **false negative rate**, **precision**, and **F1-score**—using the key_metrics() function. These metrics capture both overall predictive ability and the model’s capacity to distinguish between patients requiring and not requiring follow-up. **Sensitivity** is prioritized, as correctly identifying patients who require follow-up is critical to prevent missed cases with potential clinical consequences. **Precision** and the **F1-score** provide complementary insights into the accuracy and balance of predictions, while **specificity** ensures that not all patients are unnecessarily recommended for follow-up. Given that the features show weak univariate relationships with the target, tuning will focus on _maintaining high sensitivity_ while _improving specificity_ as much as possible.
+```{r key_metrics}
+# evaluation function
+key_metrics <- function(predicted, actual){
+  # Build confusion matrix
+  confmat <- table(Predicted = predicted, Actual = actual)
+  #        No/0   Yes/1
+  # No/0
+  # Yes/1
+  
+  # get values
+  TN <- confmat[1,1]
+  TP <- confmat[2,2]
+  FN <- confmat[1,2]
+  FP <- confmat[2,1]
+  
+  # calculate
+  o_acc <- round((TP + TN)/sum(confmat),2)
+  TPR <- round(TP / (TP + FN),2)  # Sensitivity
+  TNR <- round(TN / (TN + FP),2) # Specificity
+  Precision <- round(TP / (TP + FP),2)
+  F1 <- round(2 * Precision * TPR / (Precision + TPR),2)
+  
+  
+  # calculate accuracy, TPR, and TNR and display in table
+  accuracy <- tibble(
+    'Overall Accuracy' = o_acc,
+    'True Positive Rate' = TPR,
+    'True Negative Rate' = TNR,
+    'Precision' = Precision,
+    'F1-score' = F1
+  )
+  
+  return(accuracy)
+}
+```
+
+
+For k-fold cross validation, although the standard choice for k is 10, as the dataset is extremely large (20,000 overall observations, 12,000 observations for the training set), 10 folds would be computationally expensive. Instead, we will use a k of 5 for faster compution while allowing for reliable estimates. 
+
+
+### Random Forest
+Since Random Forest already incorporates bagging techniques in its algorithm, we do not need to explicitly create boostrap samples of the training data. 
+#### k-Fold Cross-Validation Training
+```{r train_rf}
+k <- 5  # number of folds
+n <- nrow(rf_train)  # total observations: 12000 obs
+fold_indices <- sample(rep(1:k, length.out = n))  # indices for each fold (used for validation: ~2400 obs)
+
+# initiate vector for storing accuracy: [0,0,0,0,0]
+fold_acc <- numeric(k)
+fold_tpr <- numeric(k) 
+fold_tnr <- numeric(k)
+fold_fnr <- numeric(k)
+fold_precision <- numeric(k)
+fold_f1 <- numeric(k)
+
+# k-fold CV loop
+for (i in 1:k){
+  # Create train and validation folds
+  val_fold <- rf_train[fold_indices == i,]  # Rows where fold_indices equals i
+  train_fold <- rf_train[fold_indices != i,]
+  
+  # Train Random Forest (default rtree = 500)
+  rf_model <- randomForest(Follow_Up_Required ~ ., data = train_fold)
+  
+  # Make predictions and evaluate accuracy 
+  pprob <- predict(rf_model, val_fold, type = "prob")  # for soft-voting purposes
+  predictions <- ifelse(pprob[,"Yes"] > 0.5, 1, 0)  # convert + class prob to class predictions with 0.5 threshold
+  
+  # Convert actual values to match prediction format
+  actual_values <- ifelse(val_fold$Follow_Up_Required == "Yes", 1, 0)
+  
+  # store evaluation metrics 
+  metrics <- key_metrics(predictions, actual_values)
+  fold_acc[i] <- metrics$`Overall Accuracy`
+  fold_tpr[i] <- metrics$`True Positive Rate`
+  fold_tnr[i] <- metrics$`True Negative Rate`
+  fold_precision[i] <- metrics$`Precision`
+  fold_f1[i] <- metrics$`F1-score`
+}
+
+# calculate average performance 
+# Calculate means
+rf_cv_results <- tibble(
+  'Overall Accuracy' = mean(fold_acc),
+  'True Positive Rate' = mean(fold_tpr),
+  'True Negative Rate' = mean(fold_tnr),
+  'Precision' = mean(fold_precision),
+  'F1-score' = mean(fold_f1)
+)
+
+kable(rf_cv_results, caption = "Key Metrics of the Random Forest Model") %>% 
+  kable_styling()
+```
+As shown in the table above, the overall accuracy of the model is only `r mean(fold_acc)`. This is to be expected as the features are weakly correlated with the target. The sensitivity of the model is only `r mean(fold_tpr)`, while the specificity is `r mean(fold_tnr)`. Given the clinical importance of minimizing missed follow-ups, tuning will focus on improving sensitivity while monitoring precision and specificity to avoid excessive false positives. 
+
+#### Hyperparameter Tuning 
+To tune the model, we will use the `caret` package as it provides tools to assist with automated parameter tuning. First, we will set up a tuning grid for random forest training and evaluation using the mtry parameter, which defines how many features are randomly selected at each split in each decision tree. We will need to implement a custom summary function to obtain the key metric results that align with our evaluation framework.
+```{r summary_function}
+# Custom summary function that uses your key_metrics function
+custom_summary <- function(data, lev = NULL, model = NULL) {
+  # Determine positive class (typically the second level in caret)
+  pos_class <- lev[2]
+  
+  # Convert probabilities to predictions using 0.5 threshold
+  predictions <- ifelse(data[[pos_class]] > 0.5, 1, 0)
+  
+  # Convert actual values to match prediction format
+  if (is.factor(data$obs)){
+    actual_values <- ifelse(data$obs == pos_class, 1, 0)
+  }else{
+    actual_values <- data$obs
+  }
+  
+  # Use your existing key_metrics function
+  metrics_result <- key_metrics(predictions, actual_values)
+  
+  # Extract values and convert to named vector (caret requirement)
+  result <- c(
+    Accuracy = metrics_result$`Overall Accuracy`,
+    Sensitivity = metrics_result$`True Positive Rate`,  # TPR
+    Specificity = metrics_result$`True Negative Rate`,  # TNR
+    Precision = metrics_result$`Precision`,
+    F1 = metrics_result$`F1-score`
+  )
+  
+  return(result)
+}
+```
+
+
+```{r rf_tune}
+# Set up tuning grid
+rf_grid <- expand.grid(mtry=c(2,4,8,16))
+
+# Set CV control
+ctrl <- trainControl(
+  method = "cv",  # 5-fold cross-validation
+  number = 5,  # Number of folds
+  classProbs = TRUE,  # Generate class probabilities (needed for your custom_summary)
+  summaryFunction = custom_summary,  # Your custom evaluation metrics
+  savePredictions = "final"  # Save predictions from best model
+)
+
+# Model Training and Tuning
+rf_tuned <- train(
+  Follow_Up_Required ~ .,  # Formula: predict Follow_Up_Required using all other variables
+  data = rf_train,  # Training dataset
+  method = "rf",  # Random Forest algorithm
+  tuneGrid = rf_grid,  # Parameter values to test
+  trControl = ctrl,  # Cross-validation setup
+  ntree = 500,  # Number of trees (fixed parameter)
+  metric = "Sensitivity"  # Optimization metric (from your custom_summary)
+)
+```
+
+```{r rf_tuned_results}
+# extract results from the best mtry based on sensitivity
+best_results <- rf_tuned$results[rf_tuned$results$mtry == rf_tuned$bestTune$mtry, ]
+
+# Convert to match your manual format (percentages)
+rf_tuned_results <- tibble(
+  'Overall Accuracy' = round(best_results$Accuracy, 2),
+  'True Positive Rate' = round(best_results$Sensitivity, 2),
+  'True Negative Rate' = round(best_results$Specificity, 2),
+  'Precision' = round(best_results$Precision, 2),
+  'F1-score' = round(best_results$F1, 2)
+)
+
+kable(rf_tuned_results, caption = "Key Metrics of the Tuned Random Forest Model") %>% 
+  kable_styling()
+```
+The Random Forest hyperparameter tuning was performed using sensitivity as the evaluation metric, prioritizing the detection of patients requiring follow-up over minimizing false positives. This clinical decision reflects the higher cost of missing patients who need care compared to unnecessary screening. 
+
+The model was tuned across `mtry` values of 2, 4, 8, and 16. The optimal configuration (`mtry = 2`) achieved 62.2% sensitivity compared to 53.6-54.6% for other parameter settings. While overall accuracy remained around 50%, optimizing sensitivity aligns with medical screening practices where minimizing missed diagnoses is essential.
+
+Furthermore, as this model will be used in a heterogeneous ensemble later on, extensive individual optimization is not necessary since ensemble methods can compensate for individual model weaknesses. The mediocre performance is worth noting, however, as this may impact the ensemble's overall performance and suggest that a lower weight should be allocated to the Random Forest component during ensemble construction.
+
+### Homogeneous Logistic Regression Ensemble
+To build the homogeneous logistic regression ensemble we will apply bagging with 50 bootstrap samples, balancing performance gains and computational efficiency, since increasing the number of partitions beyond 50 yields diminishing returns. The model’s performance will be evaluated using k-fold cross-validation.
+
+#### k-Fold Cross-Validation Training (with Bagging)
+```{r LR1}
+k <- 5  # number of folds
+n.partitions <- 50  # number of bootstrap samples for bagging
+n <- nrow(LR_train)
+folds <- sample(rep(1:k, length.out = n))
+fold_results <- matrix(0, nrow = k, ncol = 5)  # Storage for metrics (Accuracy, TPR, TNR, Precision, F1)
+
+all_probs <- c()  # store predicted probabilities for future ROC obs
+all_actual <- c()  # store actual labels for ROC obs
+
+for (i in 1:k) {
+  val_fold <- LR_train[folds == i, ]
+  train_fold <- LR_train[folds != i, ]
+
+  # Initiate bagging predictions storage
+  bagged_probs <- matrix(0, nrow = nrow(val_fold), ncol = n.partitions)
+
+  for (b in 1:n.partitions){
+    # Bootstrap sample
+    train_sample <- train_fold[sample(1:nrow(train_fold), replace = T),]  
+    
+    # Perform backward step-wise logisitic regression
+    log_model <- glm(Follow_Up_Required ~., family=binomial(link='logit'), data=train_fold)
+    
+    # Predict
+    bagged_probs[,b] <- predict(log_model, val_fold, type="response")
+  }
+  
+  # average probability across boostrap models
+  avg_prob <- rowMeans(bagged_probs)
+  predictions <- ifelse(avg_prob > 0.5, 1, 0)
+  
+  # convert actual values for comparison/eval
+  actual <- ifelse(val_fold$Follow_Up_Required == "Yes", 1, 0)
+  
+  # store avg probabilities and actual values for ROC curve (tuning purposes)
+  all_probs <- c(all_probs, avg_prob)
+  all_actual <- c(all_actual, actual)
+  
+  # Evaluate 
+  metrics <- key_metrics(predictions, actual)
+  fold_results[i, ] <- as.numeric(metrics[1,])
+}
+
+
+colnames(fold_results) <- colnames(metrics)  # assign column names
+logit_bagging_cv <- colMeans(fold_results)  # calculate average performance
+
+# Display
+kable(as.data.frame(t(logit_bagging_cv)), 
+      caption = "Key Metrics of the Homogeneous Logistic Regression Model") %>%
+  kable_styling()
+```
+From the table above, the homogeneous logistic regression ensemble achieved a relatively low overall accuracy of `r logit_bagging_cv["Overall Accuracy"]`. The true positive rate (sensitivity) is decent at`r logit_bagging_cv["True Positive Rate"]`, while the true negative rate (specificity) is substantially lower at `r logit_bagging_cv["True Negative Rate"]`. This indicates that the model correctly identified ~65% of patients requiring follow-up but misclassified a large proportion of patients who did not require follow-up. The precision of `r logit_bagging_cv["Precision"]` suggests that only about half of the predicted follow_ups were correct, and the F1-score of `r logit_bagging_cv["F1-score"]` reflects the balance between sensitivity and precision. Given that correctly identifying patients needing follow-up is clinically more important than avoiding unnecessary recommendations, this trade-off—while not ideal—is acceptable for the current stage of modeling.
+
+
+#### Hyperparameter Tuning
+To reduce model complexity and retain only statistically significant predictors, we applied a backward stepwise elimination approach within each bootstrap sample, by implementing the function `stepwise_backwards()`.
+```{r stepwise}
+# stepwise function
+stepwise_backwards <- function(data, target, threshold) {
+  # Start with all predictors except the target
+  predictors <- setdiff(names(data), target)
+  
+  repeat {
+    # Fit logistic regression with current predictors
+    formula <- as.formula(paste(target, "~", paste(predictors, collapse = " + ")))
+    model <- glm(formula, family = binomial(link = "logit"), data = data)
+    
+    # Extract p-values (exclude intercept)
+    p_values <- summary(model)$coefficients[-1, 4]
+    
+    # Check stopping condition
+    max_p <- max(p_values)
+    if (max_p <= threshold) break
+    
+    # Remove the variable with the highest p-value
+    remove_var <- names(which.max(p_values))
+    predictors <- predictors[predictors != remove_var]
+    
+    # Stop if no predictors left
+    if (length(predictors) == 0) break
+  }
+  
+  return(model)
+}
+```
+
+``` {r stepwiseLR}
+# Train function
+final_stepwise_bagged <- function(train_data, n_bags=50){
+  models <- list()
+  
+  for (b in 1:n_bags){
+    # Bootstrap sample
+    boot_sample <- train_data[sample(nrow(train_data), replace = TRUE), ]
+    
+    # Stepwise backward elimination
+    model <- stepwise_backwards(boot_sample, "Follow_Up_Required", 0.05)
+    models[[b]] <- model
+  }
+  return(models)
+
+}
+
+# Predict function
+predict_stepwise_bagged <- function(models, new_data){
+  predictions <- sapply(models, function(x){
+    predict(x, new_data, type="response")
+  })
+  
+  # Get average 
+  avg_probs <- rowMeans(predictions)
+  return(avg_probs)
+}
+
+
+k <- 5  # number of folds
+n.partitions <- 50  # number of bootstrap samples for bagging
+n <- nrow(LR_train)
+folds <- sample(rep(1:k, length.out = n))
+fold_results <- matrix(0, nrow = k, ncol = 5)  # Storage for metrics (Accuracy, TPR, TNR, Precision, F1)
+
+all_probs <- c()  # store predicted probabilities for future ROC obs
+all_actual <- c()  # store actual labels for ROC obs
+
+for (i in 1:k) {
+  val_fold <- LR_train[folds == i, ]
+  train_fold <- LR_train[folds != i, ]
+
+  # implement train functions 
+  bagged_models <- final_stepwise_bagged(train_fold, n_bags = 50)
+  
+  # average probability across boostrap models
+  avg_prob <- predict_stepwise_bagged(bagged_models, val_fold)  # implement predictor function
+  predictions <- ifelse(avg_prob > 0.5, 1, 0)
+  
+  # convert actual values for comparison/eval
+  actual <- ifelse(val_fold$Follow_Up_Required == "Yes", 1, 0)
+  
+  # store avg probabilities and actual values for ROC curve (tuning purposes)
+  all_probs <- c(all_probs, avg_prob)
+  all_actual <- c(all_actual, actual)
+  
+  # Evaluate 
+  metrics <- key_metrics(predictions, actual)
+  fold_results[i, ] <- as.numeric(metrics[1,])
+}
+
+
+colnames(fold_results) <- colnames(metrics)  # assign column names
+stepwise_LR_cv <- colMeans(fold_results)  # calculate average performance
+
+# Display
+kable(as.data.frame(t(stepwise_LR_cv)), 
+      caption = "Key Metrics of the Homogeneous Logistic Regression Model") %>%
+  kable_styling()
+```
+
+
+The stepwise backwards elimination improved the sensitivity to `r stepwise_LR_cv["True Positive Rate"]` but it reduced the specificity to `r stepwise_LR_cv["True Negative Rate"]`. Therefore, we moved onto a second round of tuning by testing different thresholds to try and improve specificity while maintaining clinically acceptable sensitivity. We identified an optimal threshold using ROC analysis. Among thresholds with sensitivity >= 0.75, we selected the one that maximized specificity. This approach ensures fewer unnecessary follow-ups while preserving the ability to correctly identify most patients requiring follow-up.
+```{r ThresholdTuning }
+# ROC-based threshold optimization
+roc_obj <- roc(all_actual, all_probs)
+roc_data <- data.frame(
+  threshold = roc_obj$thresholds,
+  sensitivity = roc_obj$sensitivities,
+  specificity = roc_obj$specificities
+)
+
+# Find optimal threshold (sensitivity >= 0.75, maximize specificity)
+roc_filtered <- subset(roc_data, sensitivity >= 0.75)
+best_threshold <- roc_filtered[which.max(roc_filtered$specificity), ]
+
+# Apply optimal threshold
+optimized_predictions <- ifelse(all_probs > best_threshold$threshold, 1, 0)
+optimized_performance <- key_metrics(optimized_predictions, all_actual)
+
+# Comparison table
+comparison_results <- rbind(
+  "Baseline (0.5)" = stepwise_LR_cv,
+  "Optimized" = as.numeric(optimized_performance[1, ])
+)
+
+kable(comparison_results, 
+      caption = "Stepwise Logistic Regression: Baseline vs Threshold Optimization",
+      digits = 3) %>%
+  kable_styling()
+
+```
+
+Among thresholds maintaining sensitivity ≥ 0.75, we selected the threshold (`r round(best_threshold$threshold, 3)`) that maximized specificity (`r round(best_threshold$specificity, 3)`). However, applying this optimized threshold resulted in a sensitivity of `r round(as.numeric(optimized_performance[1, "True Positive Rate"]), 3)` and a specificity of `r round(as.numeric(optimized_performance[1, "True Negative Rate"]), 3)`, compared to the baseline performance of `r round(stepwise_LR_cv["True Positive Rate"], 3)` sensitivity and `r round(stepwise_LR_cv["True Negative Rate"], 3)` specificity.
+
+The threshold optimization achieved only a modest specificity improvement (+`r round((as.numeric(optimized_performance[1, "True Negative Rate"]) - stepwise_LR_cv["True Negative Rate"])*100, 1)`%) while reducing sensitivity (-`r round((stepwise_LR_cv["True Positive Rate"] - as.numeric(optimized_performance[1, "True Positive Rate"]))*100, 1)`%). Given that sensitivity is prioritized in medical screening contexts and the marginal gains achieved, we proceeded with the baseline stepwise logistic regression model using the standard 0.5 threshold.
+
+#### Final Model Training
+The final model will be trained using the full training set for the heterogeneous ensemble, which will be evaluated using the holdout method. 
+```{r LRModel}
+# Train on full training set for ensemble
+stepwise_ensemble_model <- final_stepwise_bagged(LR_train, n_bags = 50)
+```
+
+
+### Homogeneous kNN Ensemble
+The following function will be used to train multiple kNN models on bootstrap samples of the training data and average the predicted probabilities. 
+```{r baggedkNN}
+# kNN function using bagging
+train_bagged_knn_predict <- function(train_data, test_data, optimal_k, n.partitions = 50) {
+  # Separate features and labels
+  trainX_all <- train_data[, !names(train_data) %in% "Follow_Up_Required"]
+  testX <- test_data[, !names(test_data) %in% "Follow_Up_Required"]
+  
+  # Prepare storage for bagged predictions
+  bagged_probs <- matrix(0, nrow = nrow(test_data), ncol = n.partitions)
+  
+  for (b in 1:n.partitions) {
+    # Bootstrap sample from full training data
+    train_sample <- train_data[sample(1:nrow(train_data), replace = TRUE), ]
+    
+    trainX <- train_sample[, !names(train_sample) %in% "Follow_Up_Required"]
+    trainY <- as.numeric(train_sample$Follow_Up_Required == "Yes")
+    
+    # Predict probabilities
+    knn_prob <- knn.reg(train = trainX,
+                        test = testX,
+                        y = trainY,
+                        k = optimal_k)
+    
+    bagged_probs[, b] <- knn_prob$pred
+  }
+  
+  # Average the predicted probabilities across bootstrap models
+  avg_probs <- rowMeans(bagged_probs)
+  
+  return(avg_probs)
+}
+```
+
+#### k-Fold Cross-Validation Training (with Bagging)
+To train the homogeneous kNN ensemble, we initialized kNN with k=5 as a balance between bias and variance. Small k values (k=1,3) risk overfitting to noise, while large k values may over-smooth decision boundaries. The k=5 starting point allows for local pattern detection while maintaining computational efficiency. Although the square root rule would suggest k ≈ $\sqrt(12000) ≈ 109$, such large k values are impractical and would likely over-smooth patterns in our dataset.
+
+
+
+```{r kNN1}
+# Perform kfold-CV eval on bagged kNN ensemble using the functions above
+k <- 5  # number of folds
+n.partitions <- 50  # number of bootstrap samples for bagging
+n <- nrow(kNN_train)  # your kNN dataset
+folds <- sample(rep(1:k, length.out = n))
+fold_results <- matrix(0, nrow = k, ncol = 5)  # Storage for metrics
+
+optimal_k <- 5
+
+for (i in 1:k) {
+  val_fold <- kNN_train[folds == i, ]
+  train_fold <- kNN_train[folds != i, ]
+  
+  # Initiate bagging predictions storage
+  bagged_probs <- matrix(0, nrow = nrow(val_fold), ncol = n.partitions)
+  
+  
+  
+  # calculate avg prob
+  avg_prob <- train_bagged_knn_predict(train_fold, val_fold, optimal_k, n.partitions = 50)
+  predictions <- ifelse(avg_prob > 0.5, 1, 0)
+  
+  # Convert actual values for comparison/evaluation
+  actual <- ifelse(val_fold$Follow_Up_Required == "Yes", 1, 0)
+
+  # Evaluate using your key_metrics function
+  metrics <- key_metrics(predictions, actual)
+  fold_results[i, ] <- as.numeric(metrics[1, ])
+}
+
+# calculate average performance
+colnames(fold_results) <- colnames(metrics)
+knn_bagging_cv <- colMeans(fold_results)
+
+# Display 
+kable(as.data.frame(t(knn_bagging_cv)), 
+      caption = "Key Metrics of the Homogeneous kNN Model") %>%
+  kable_styling()
+```
+The homogeneous kNN ensemble achieved a sensitivity of `r round(knn_bagging_cv["True Positive Rate"], 3)` and specificity of `r round(knn_bagging_cv["True Negative Rate"], 3)`. Given the clinical importance of maximizing sensitivity in follow-up screening, we investigated various k-values to potentially improve the model's ability to correctly identify patients requiring follow-up.
+
+#### Hyperparameter Tuning
+To tune the bagged kNN ensemble, we will first use the `caret` package to identify the optimal number of neighbors (k), similar to our approach for the Random Forest model. We will evaluate k values of 11, 15, 25, 55, 109. This range provides a balance between exploring different neighborhood sizes and allows us to see the performance of the square root ruled k. Using `caret` allows for computational efficiency, given that bagging combined with k-fold cross-validation is already computationally intensive.
+```{r kNNTune}
+# Tune k using caret and the same ctrl as random forest
+# set grid
+knn_grid <- expand.grid(k = c(11,15,25,55, 109))
+knn_tuned <- train(Follow_Up_Required ~ ., 
+                   data = kNN_train, 
+                   method = "knn",
+                   tuneGrid = knn_grid, 
+                   trControl = ctrl, 
+                   metric = "Sensitivity",
+                   preProcess = c("center", "scale"))
+optimal_k <- knn_tuned$bestTune$k
+```
+
+```{r}
+# extract results 
+knn_all <- knn_tuned$results
+
+# Convert to match your manual format (percentages)
+knn_tuned_results <- tibble(
+  k = knn_all$k,
+  'Overall Accuracy' = round(knn_all$Accuracy, 2),
+  'True Positive Rate' = round(knn_all$Sensitivity, 2),
+  'True Negative Rate' = round(knn_all$Specificity, 2),
+  'Precision' = round(knn_all$Precision, 2),
+  'F1-score' = round(knn_all$F1, 2)
+)
+
+kable(knn_tuned_results, caption = "Key Metrics of the Tuned kNN Model") %>% 
+  kable_styling()
+```
+From the table above, we can see that although the k-value of 109 has the largest sensitivity, it is not much better than the smaller k value of 55. For the final model, we will use the k value of 55 because the sensitivity is still highly sensitive but is slightly more balanced with a slightly higher specificity.
+
+#### Final Model Training
+Since the kNN function I created both trains and predicts, I will be implementing the following code inside the ensemble:
+`kNN_probs <- train_bagged_knn_predict(kNN_train, kNN_val, optimal_k = 55, n.partitions = 50)`
+
+
+### Homogeneous Neural Network Ensemble
+
+#### k-Fold Cross-Validation Training (with Bagging)
+To train the bagged Neural Network ensemble, we will use the functions I above. As neural networks are computationally expensive, we will use the default parameters of the `nnet()` function, which performs faster than `neuralnet()`.
+```{r nn1}
+k <- 5
+n_bags <- 50
+n <- nrow(nn_train)
+folds <- sample(rep(1:k, length.out = n))
+fold_results <- matrix(0, nrow = k, ncol = 5)
+
+for (i in 1:k) {
+  # Split data into training and validation folds
+  val_fold <- nn_train[folds == i, ]
+  train_fold <- nn_train[folds != i, ]
+  
+  # Train bagged neural network ensemble
+  models <- list()
+  for (b in 1:n_bags) {
+    # Bootstrap sample from training fold
+    boot_sample <- train_fold[sample(nrow(train_fold), replace = TRUE), ]
+    
+    # Train individual neural network
+    model <- nnet(Follow_Up_Required ~ ., 
+                 data = boot_sample,
+                 size = 1,
+                 trace = FALSE)
+    
+    models[[b]] <- model
+  }
+  
+  # Make predictions on validation fold
+  # Get predictions from all models
+  all_predictions <- matrix(0, nrow = nrow(val_fold), ncol = n_bags)
+  for (b in 1:n_bags) {
+    all_predictions[, b] <- predict(models[[b]], val_fold, type = "raw")
+  }
+  
+  # Average predictions across all models
+  avg_prob <- rowMeans(all_predictions)
+  predictions <- ifelse(avg_prob > 0.5, 1, 0)
+  actual <- ifelse(val_fold$Follow_Up_Required == "Yes", 1, 0)
+  
+  # Ensure both classes are present for proper confusion matrix
+  predictions <- factor(predictions, levels = c(0, 1))
+  actual <- factor(actual, levels = c(0, 1))
+  
+  # Calculate metrics for this fold
+  metrics <- key_metrics(predictions, actual)
+  fold_results[i, ] <- as.numeric(metrics[1, ])
+}
+
+# Calculate average performance across all folds
+colnames(fold_results) <- colnames(metrics)
+nn_bagging_cv <- colMeans(fold_results)
+
+# Display results
+kable(as.data.frame(t(nn_bagging_cv)), 
+      caption = "Key Metrics of the Bagged Neural Network Model") %>%
+  kable_styling()
+```
+
+The Neural Network model was unable to properly predict the target. This is likely due to the poor feature-target correlation we observed in the correlation analysis. As such, we will not include the Neural Network model in the heterogeneous ensemble. 
+
+### Ensemble 
+The ensemble will be trained with the complete training sets and tested using the validation set. A final comparison will be done for the individual and ensemble models using the test set. 
+
+#### Training
+```{r ensemble}
+# function to train ensemble
+ensemble <- function(rf_model, logR_model, rf_test, logR_test, knn_train, knn_test, weights = c(1/3, 1/3, 1/3)){
+  # Predict probabilities for each class
+  rf_probs <- predict(rf_model, rf_test, type = "prob")[,'Yes']
+  lr_probs <- predict_stepwise_bagged(logR_model, logR_test)
+  knn_probs <- train_bagged_knn_predict(knn_train, knn_test, optimal_k = 55, n.partitions = 50)
+  
+  # Combine into a matrix to calculate row-wise mean
+  ## we only want the positive class of the rf prediction
+  ensemble_probs <- weights[1] * rf_probs + 
+                   weights[2] * lr_probs + 
+                   weights[3] * knn_probs
+  
+  return(list(
+    ensemble_probs = ensemble_probs,
+    rf_probs = rf_probs,
+    lr_probs = lr_probs,
+    knn_probs = knn_probs
+  ))
+}
+
+ensemble_results <- ensemble(
+  rf_model = rf_tuned,  
+  logR_model = stepwise_ensemble_model,  
+  rf_test = rf_val, 
+  logR_test = LR_val,
+  knn_train = kNN_train,
+  knn_test = kNN_val,
+  weights = c(1/3, 1/3, 1/3)  # Equal weights
+)
+```
+
+#### Performance Evaluation
+```{r eval_ensemble}
+evaluate_ensemble <- function(ensemble_results, validation_data, threshold = 0.5) {
+  actual <- ifelse(validation_data$Follow_Up_Required == "Yes", 1, 0)
+  
+  # Evaluate each model
+  models_to_eval <- list(
+    "Random_Forest" = ensemble_results$rf_probs,
+    "Logistic_Regression" = ensemble_results$lr_probs, 
+    "kNN" = ensemble_results$knn_probs,
+    "Ensemble" = ensemble_results$ensemble_probs
+  )
+  
+  # Initialize results list
+  results_list <- list()
+  
+  # Evaluate models and store metrics
+  for (i in 1:length(models_to_eval)) {
+    probs <- models_to_eval[[i]]
+    predictions <- ifelse(probs > threshold, 1, 0)
+    
+    # Keep as numeric for key_metrics function
+    predictions_numeric <- as.numeric(predictions)
+    actual_numeric <- as.numeric(actual)
+    
+    # Calculate metrics
+    metrics <- key_metrics(predictions_numeric, actual_numeric)
+    
+    # Store metrics with model name
+    model_results <- cbind(Model = names(models_to_eval)[i], metrics)
+    results_list[[i]] <- model_results
+  }
+  
+  # Combine all results
+  results <- bind_rows(results_list)
+  
+  return(results) 
+}
+
+# evaluate the ensemble
+results <- evaluate_ensemble(ensemble_results, rf_val)
+kable(results, row.names = F) %>% kable_styling()
+
+```
+
+#### Tuning
+To improve the ensemble performance, we will tune the model by adjusting the weights of individual components. While the Logistic Regression model achieved the highest sensitivity, which is crucial for medical screening, the current ensemble sensitivity falls short of this individual performance. To address this, we will assign weights that prioritize the Logistic Regression model while leveraging kNN's superior specificity to reduce unnecessary follow-up appointments.
+
+The proposed weights are: Random Forest = 0.1, Logistic Regression = 0.7, and kNN = 0.20. This weighting strategy gives the highest weight to Logistic Regression to maintain high sensitivity, while assigning substantial weight to kNN to improve specificity and reduce false positives. The goal is to get the sensitivity to at least 0.75, while maintaining a decent specificity.
+```{r tune_ensemble}
+tune_weights <- c(0.1, 0.7, 0.2)
+
+tuned_ensemble_results <- ensemble(
+  rf_model = rf_tuned,  
+  logR_model = stepwise_ensemble_model,  
+  rf_test = rf_val, 
+  logR_test = LR_val,
+  knn_train = kNN_train,
+  knn_test = kNN_val,
+  weights = tune_weights
+)
+
+# evaluate the ensemble
+tuned_results <- evaluate_ensemble(tuned_ensemble_results, rf_val)
+kable(tuned_results, row.names = F) %>% kable_styling()
+```
+Although the sensitivity did not reach the target of 0.75, it improved from `r results[4,'True Positive Rate']` to `r tuned_results[4,'True Positive Rate']` with optimized weights. The ensemble achieves a reasonable balance between sensitivity and specificity, outperforming the equal-weighted baseline. As such, we will proceed with these tuning parameters for final evaluation using the reserved test set.
+
+
+## Final Evaluation
+```{r finalpred}
+# Generate final test predictions
+final_test_results <- ensemble(
+  rf_model = rf_tuned,
+  logR_model = stepwise_ensemble_model,
+  rf_test = rf_test,
+  logR_test = LR_test,
+  knn_train = kNN_train,
+  knn_test = kNN_test,
+  weights = tune_weights
+)
+
+# Evaluate final performance
+final_performance <- evaluate_ensemble(final_test_results, rf_test)
+kable(tuned_results, row.names = F) %>% kable_styling()
+
+```
+The ensemble showed slight performance degradation on the unseen test data, achieving a sensitivity of `r round(as.numeric(final_performance[4,'True Positive Rate']), 3)` compared to `r round(as.numeric(tuned_results[4,'True Positive Rate']), 3)` on the validation set. This minor decrease is expected and indicates good generalization without significant overfitting. Despite this, the ensemble outperformed two of the three individual models, achieving the second-best sensitivity after logistic regression (`r round(as.numeric(final_performance[2,'True Positive Rate']), 3)`). Importantly, the ensemble demonstrated better balance than the logistic regression model, achieving higher specificity (`r round(as.numeric(final_performance[4,'True Negative Rate']), 3)` vs `r round(as.numeric(final_performance[2,'True Negative Rate']), 3)`) while maintaining clinically acceptable sensitivity.
+
+The modest overall performance reflects the fundamental challenge identified in our exploratory analysis: weak feature-outcome correlations. Despite these constraints, the ensemble approach successfully prioritizes sensitivity—the most critical aspect for medical screening where missing patients requiring follow-up has serious clinical consequences. 
+
+It is important to note that the implementation of k-fold cross-validation on bagged models is computationally expensive, requiring substantial processing time for comprehensive model evaluation. However, this methodological rigor ensures robust performance estimates and proper model validation, which is essential for clinical applications where model reliability is paramount.
+
+
+## References
+Arif Miah. (March 2025). [_Brain Tumor Dataset_](https://www.kaggle.com/datasets/miadul/brain-tumor-dataset), Version 1. <br>
+Lantz, B. (2019). Machine Learning with R : Expert Techniques for Predictive Modeling (Third). Packt Publishing, Limited, . Â. <br>
